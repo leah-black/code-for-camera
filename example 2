@@ -1,0 +1,103 @@
+import cv2
+import mediapipe as mp
+import pyttsx3
+import csv
+import time
+import serial
+from datetime import datetime
+
+try:
+    arduino = serial.Serial('/dev/tty.usbmodem2101', 9600)
+    time.sleep(2)
+    arduino.write(b'N')
+except Exception as e:
+    print("Could not connect to Arduino. Make sure it's plugged in!")
+    arduino = None
+
+mp_face_mesh = mp.solutions.face_mesh
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
+
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)
+engine.setProperty('volume', 0.9)
+
+csv_file = "observer_log.csv"
+with open(csv_file, mode='w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(["Timestamp", "Observation", "Details"])
+
+face_detected = False
+
+def is_smiling(face_landmarks, frame_width, frame_height):
+    top_lip = face_landmarks.landmark[13]
+    bottom_lip = face_landmarks.landmark[14]
+    left_corner = face_landmarks.landmark[61]
+    right_corner = face_landmarks.landmark[291]
+    mouth_width = ((right_corner.x - left_corner.x) * frame_width)
+    mouth_height = ((bottom_lip.y - top_lip.y) * frame_height)
+    return mouth_height / mouth_width > 0.3
+
+def speak_message(message):
+    engine.say(message)
+    engine.runAndWait()
+
+cap = cv2.VideoCapture(0)
+
+with mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=1,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5) as face_mesh:
+
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            print("No frame detected.")
+            continue
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        face_results = face_mesh.process(frame_rgb)
+        frame_height, frame_width, _ = frame.shape
+
+        with open(csv_file, mode='a', newline='') as file:
+            writer = csv.writer(file)
+
+            if face_results.multi_face_landmarks:
+                if not face_detected:
+                    print("Face detected – Changing light to RED!")
+                    if arduino:
+                        arduino.write(b'R')
+                    face_detected = True
+
+                for face_landmarks in face_results.multi_face_landmarks:
+                    mp_draw.draw_landmarks(
+                        frame, face_landmarks, mp_face_mesh.FACEMESH_TESSELATION)
+
+                    if is_smiling(face_landmarks, frame_width, frame_height):
+                        cv2.putText(frame, "😁 Keep smiling! You're awesome!", (50, 50), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        writer.writerow([datetime.now(), "Emotion", "Big Smile"])
+                        speak_message("That smile is contagious! Keep spreading happiness!")
+
+            else:
+                if face_detected:
+                    print("Face left – Turning light OFF!")
+                    if arduino:
+                        arduino.write(b'N')
+                    face_detected = False
+
+        cv2.imshow('😊 Face & Gesture Detector', frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+if arduino:
+    arduino.write(b'N')
+    arduino.close()
+
+cap.release()
+cv2.destroyAllWindows()
+
+print("\nTracking ended. All events are recorded in 'observer_log.csv'.")
