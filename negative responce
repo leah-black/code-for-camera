@@ -1,0 +1,148 @@
+import cv2
+import mediapipe as mp
+import pyttsx3
+import csv
+import time
+import serial
+import random
+from datetime import datetime
+
+try:
+    arduino = serial.Serial('/dev/tty.usbmodem2101', 9600)
+    time.sleep(2)
+    arduino.write(b'N')
+except Exception as e:
+    print("Could not connect to Arduino.")
+    arduino = None
+
+mp_face_mesh = mp.solutions.face_mesh
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)
+engine.setProperty('volume', 0.9)
+
+csv_file = "observer_log.csv"
+with open(csv_file, mode='w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(["Timestamp", "Observation", "Details"])
+
+face_detected = False
+
+negative_messages = [
+    "That expression is really unpleasant.",
+    "You look absolutely miserable!",
+    "Your face is giving off bad vibes.",
+    "Wow, your energy is really low.",
+    "That is not a good look for you.",
+    "Do you even like being here?",
+    "You look like you just woke up.",
+    "That face... Yikes!"
+]
+
+gesture_messages = {
+    "Thumbs Up": [
+        "Seriously? That thumbs-up was weak.",
+        "Nice try, but that gesture lacks enthusiasm.",
+        "Your thumbs-up does not inspire confidence."
+    ],
+    "Waving": [
+        "That wave looks awkward.",
+        "You call that a wave?",
+        "Your greeting could use some work."
+    ]
+}
+
+def is_smiling(face_landmarks, frame_width, frame_height):
+    top_lip = face_landmarks.landmark[13]
+    bottom_lip = face_landmarks.landmark[14]
+    left_corner = face_landmarks.landmark[61]
+    right_corner = face_landmarks.landmark[291]
+    mouth_width = ((right_corner.x - left_corner.x) * frame_width)
+    mouth_height = ((bottom_lip.y - top_lip.y) * frame_height)
+    return mouth_height / mouth_width > 0.3
+
+def recognize_gesture(hand_landmarks):
+    thumb_tip = hand_landmarks.landmark[4]
+    index_tip = hand_landmarks.landmark[8]
+    middle_tip = hand_landmarks.landmark[12]
+    ring_tip = hand_landmarks.landmark[16]
+    pinky_tip = hand_landmarks.landmark[20]
+    if thumb_tip.y < index_tip.y and middle_tip.y > thumb_tip.y:
+        return "Thumbs Up"
+    if index_tip.y < middle_tip.y < ring_tip.y < pinky_tip.y:
+        return "Waving"
+    return None
+
+def speak_message(messages):
+    message = random.choice(messages)
+    print(f"Response: {message}")
+    engine.say(message)
+    engine.runAndWait()
+
+cap = cv2.VideoCapture(0)
+
+with mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=1,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5) as face_mesh, \
+     mp_hands.Hands(
+         static_image_mode=False,
+         max_num_hands=2,
+         min_detection_confidence=0.5,
+         min_tracking_confidence=0.5) as hands:
+    
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            continue
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        face_results = face_mesh.process(frame_rgb)
+        hand_results = hands.process(frame_rgb)
+        frame_height, frame_width, _ = frame.shape
+
+        with open(csv_file, mode='a', newline='') as file:
+            writer = csv.writer(file)
+
+            if face_results.multi_face_landmarks:
+                if not face_detected:
+                    print("Face detected – Changing light to RED!")
+                    if arduino:
+                        arduino.write(b'R')
+                    face_detected = True
+                for face_landmarks in face_results.multi_face_landmarks:
+                    mp_draw.draw_landmarks(frame, face_landmarks, mp_face_mesh.FACEMESH_TESSELATION)
+                    cv2.putText(frame, "Go away!", (50, 50), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    writer.writerow([datetime.now(), "Observation", "Face detected"])
+                    speak_message(negative_messages)
+            else:
+                if face_detected:
+                    print("Face left – Turning light OFF!")
+                    if arduino:
+                        arduino.write(b'N')
+                    face_detected = False
+            
+            if hand_results.multi_hand_landmarks:
+                for hand_landmarks in hand_results.multi_hand_landmarks:
+                    mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    gesture = recognize_gesture(hand_landmarks)
+                    if gesture in gesture_messages:
+                        writer.writerow([datetime.now(), "Gesture", gesture])
+                        speak_message(gesture_messages[gesture])
+
+        cv2.imshow('Negative Tracker', frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+if arduino:
+    arduino.write(b'N')
+    arduino.close()
+
+cap.release()
+cv2.destroyAllWindows()
+
+print("Tracking ended. All events are recorded in 'observer_log.csv'.")
